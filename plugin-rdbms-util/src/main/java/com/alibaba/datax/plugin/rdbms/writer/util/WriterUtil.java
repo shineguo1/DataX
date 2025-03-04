@@ -130,6 +130,14 @@ public final class WriterUtil {
                     .append(")")
                     .append(onDuplicateKeyUpdateString(columnHolders))
                     .toString();
+        }  else if (dataBaseType == DataBaseType.PostgreSQL && writeMode.trim().toLowerCase().startsWith("update")) {
+            //新增postgreSQL的更新模式，进行增量更新
+            writeDataSqlTemplate = new StringBuilder()
+                    .append("INSERT INTO %s (").append(StringUtils.join(columnHolders, ","))
+                    .append(") VALUES(").append(StringUtils.join(valueHolders, ","))
+                    .append(")")
+                    .append(onDuplicateKeyUpdateStringForPostgresql(writeMode.trim().replace(" ",""), columnHolders))
+                    .toString();
         } else {
 
             //这里是保护,如果其他错误的使用了update,需要更换为replace
@@ -162,6 +170,45 @@ public final class WriterUtil {
             sb.append("=VALUES(");
             sb.append(column);
             sb.append(")");
+        }
+
+        return sb.toString();
+    }
+
+    private static String onDuplicateKeyUpdateStringForPostgresql(String writeMode, List<String> columnHolders) {
+        String[] writeModeArr = writeMode.split("#", -1);
+        int writeModeArrLen = writeModeArr.length;
+        writeMode = writeModeArr[0];
+
+        StringBuilder sb = new StringBuilder();
+        if ("update".equals(writeMode) && writeModeArrLen == 2) {
+            sb.append(" ON CONFLICT ").append(writeModeArr[1]).append(" DO NOTHING");
+        } else if ("update".equals(writeMode) && writeModeArrLen >= 3) {
+            sb.append(" ON CONFLICT ").append(writeModeArr[1]);
+            String[] updateFieldArr = writeModeArr[2].replace("(","").replace(")","").split(",", -1);
+
+            List<String> updateSqlList = new ArrayList<>();
+            for (String updateField : updateFieldArr) {
+                if (!columnHolders.contains(updateField)) {
+                    continue;
+                }
+                updateSqlList.add(updateField + "=EXCLUDED." + updateField);
+            }
+
+            if (updateSqlList.isEmpty()) {
+                sb.append(" DO NOTHING");
+            } else {
+                sb.append(" DO UPDATE SET ").append(StringUtils.join(updateSqlList, ","));
+            }
+            if (writeModeArrLen >= 4) {
+                //where子句
+                sb.append(" WHERE ").append(writeModeArr[3]);
+            }
+        } else{
+            throw DataXException.asDataXException(DBUtilErrorCode.ILLEGAL_VALUE,
+                    String.format("您所配置的 writeMode(postgresql):%s 错误. " +
+                            "语法为update#(unique_key_col1, unique_key_col2, ...)#(update_col1, update_col2, ...). 请检查您的配置并作出修改.", writeMode));
+
         }
 
         return sb.toString();

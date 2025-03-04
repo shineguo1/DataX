@@ -398,6 +398,9 @@ public final class DBUtil {
         }
     }
 
+    public static void main(String[] args) {
+        DBUtil.connect(DataBaseType.PostgreSQL, "jdbc:postgresql://172.20.192.14:30078/CREDIT_DECISION_ENGINE_NEW",null);
+    }
     /**
      * a wrapped method to execute select-like sql statement .
      *
