@@ -15,7 +15,10 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.Statement;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 public final class WriterUtil {
     private static final Logger LOG = LoggerFactory.getLogger(WriterUtil.class);
@@ -92,7 +95,7 @@ public final class WriterUtil {
         return renderedSqls;
     }
 
-    public static void executeSqls(Connection conn, List<String> sqls, String basicMessage,DataBaseType dataBaseType) {
+    public static void executeSqls(Connection conn, List<String> sqls, String basicMessage, DataBaseType dataBaseType) {
         Statement stmt = null;
         String currentSql = null;
         try {
@@ -102,10 +105,20 @@ public final class WriterUtil {
                 DBUtil.executeSqlWithoutResultSet(stmt, sql);
             }
         } catch (Exception e) {
-            throw RdbmsException.asQueryException(dataBaseType,e,currentSql,null,null);
+            throw RdbmsException.asQueryException(dataBaseType, e, currentSql, null, null);
         } finally {
             DBUtil.closeDBResources(null, stmt, null);
         }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(getWriteTemplate(
+                Arrays.asList("id", "member_id", "app_code", "app_biz_code", "app_record_no", "app_org_record_no", "monitor_rule_status", "app_creation_time", "app_update_time", "sub_biz_type", "main_export_region", "secondary_export_region", "goods_type", "historical_annual_sales", "created_at", "created_by", "updated_at", "updated_by"),
+                Arrays.asList("member_id", "app_code", "app_biz_code", "app_record_no", "app_org_record_no"),
+                "update#on(member_id, app_code, app_biz_code, app_record_no)#set(app_org_record_no, sub_biz_type, app_update_time, monitor_rule_status, updated_by)#where(app_org_record_no, sub_biz_type)",
+                DataBaseType.PostgreSQL,
+                false
+        ));
     }
 
     public static String getWriteTemplate(List<String> columnHolders, List<String> valueHolders, String writeMode, DataBaseType dataBaseType, boolean forceUseUpdate) {
@@ -121,7 +134,7 @@ public final class WriterUtil {
         String writeDataSqlTemplate;
         if (forceUseUpdate ||
                 ((dataBaseType == DataBaseType.MySql || dataBaseType == DataBaseType.Tddl) && writeMode.trim().toLowerCase().startsWith("update"))
-                ) {
+        ) {
             //update只在mysql下使用
 
             writeDataSqlTemplate = new StringBuilder()
@@ -130,13 +143,13 @@ public final class WriterUtil {
                     .append(")")
                     .append(onDuplicateKeyUpdateString(columnHolders))
                     .toString();
-        }  else if (dataBaseType == DataBaseType.PostgreSQL && writeMode.trim().toLowerCase().startsWith("update")) {
+        } else if (dataBaseType == DataBaseType.PostgreSQL && writeMode.trim().toLowerCase().startsWith("update")) {
             //新增postgreSQL的更新模式，进行增量更新
             writeDataSqlTemplate = new StringBuilder()
-                    .append("INSERT INTO %s (").append(StringUtils.join(columnHolders, ","))
+                    .append("INSERT INTO %s as t0 (").append(StringUtils.join(columnHolders, ","))
                     .append(") VALUES(").append(StringUtils.join(valueHolders, ","))
                     .append(")")
-                    .append(onDuplicateKeyUpdateStringForPostgresql(writeMode.trim().replace(" ",""), columnHolders))
+                    .append(onDuplicateKeyUpdateStringForPostgresql(writeMode.trim(), columnHolders))
                     .toString();
         } else {
 
@@ -153,17 +166,17 @@ public final class WriterUtil {
         return writeDataSqlTemplate;
     }
 
-    public static String onDuplicateKeyUpdateString(List<String> columnHolders){
+    public static String onDuplicateKeyUpdateString(List<String> columnHolders) {
         if (columnHolders == null || columnHolders.size() < 1) {
             return "";
         }
         StringBuilder sb = new StringBuilder();
         sb.append(" ON DUPLICATE KEY UPDATE ");
         boolean first = true;
-        for(String column:columnHolders){
-            if(!first){
+        for (String column : columnHolders) {
+            if (!first) {
                 sb.append(",");
-            }else{
+            } else {
                 first = false;
             }
             sb.append(column);
@@ -178,40 +191,96 @@ public final class WriterUtil {
     private static String onDuplicateKeyUpdateStringForPostgresql(String writeMode, List<String> columnHolders) {
         String[] writeModeArr = writeMode.split("#", -1);
         int writeModeArrLen = writeModeArr.length;
-        writeMode = writeModeArr[0];
+        writeMode = writeModeArr[0].replace(" ", "");
 
-        StringBuilder sb = new StringBuilder();
+        StringBuilder sb;
         if ("update".equals(writeMode) && writeModeArrLen == 2) {
-            sb.append(" ON CONFLICT ").append(writeModeArr[1]).append(" DO NOTHING");
+            sb = new StringBuilder().append(" ON CONFLICT ").append(writeModeArr[1].replace(" ", "")).append(" DO NOTHING");
         } else if ("update".equals(writeMode) && writeModeArrLen >= 3) {
-            sb.append(" ON CONFLICT ").append(writeModeArr[1]);
-            String[] updateFieldArr = writeModeArr[2].replace("(","").replace(")","").split(",", -1);
-
-            List<String> updateSqlList = new ArrayList<>();
-            for (String updateField : updateFieldArr) {
-                if (!columnHolders.contains(updateField)) {
-                    continue;
-                }
-                updateSqlList.add(updateField + "=EXCLUDED." + updateField);
-            }
-
-            if (updateSqlList.isEmpty()) {
-                sb.append(" DO NOTHING");
+            if (writeModeArr[1].startsWith("(")) {
+                sb = upsertOldVersionForPostgresql(columnHolders, writeModeArr);
             } else {
-                sb.append(" DO UPDATE SET ").append(StringUtils.join(updateSqlList, ","));
+                sb = upsertNewVersionForPostgresql(columnHolders, writeModeArr);
             }
-            if (writeModeArrLen >= 4) {
-                //where子句
-                sb.append(" WHERE ").append(writeModeArr[3]);
-            }
-        } else{
+        } else {
             throw DataXException.asDataXException(DBUtilErrorCode.ILLEGAL_VALUE,
                     String.format("您所配置的 writeMode(postgresql):%s 错误. " +
-                            "语法为update#(unique_key_col1, unique_key_col2, ...)#(update_col1, update_col2, ...). 请检查您的配置并作出修改.", writeMode));
+                            "语法为update#on(col1, col2, ...)#set(col1, col2, ...)[#where(col1, col2, ...) | #where_sql(your_sql)]请检查您的配置并作出修改.", writeMode));
 
         }
-
         return sb.toString();
+    }
+
+    private static StringBuilder upsertNewVersionForPostgresql(List<String> columnHolders, String[] writeModeArr) {
+        StringBuilder onConflict = new StringBuilder();
+        List<String> updateSqlList = new ArrayList<>();
+        List<String> whereSqlList = new ArrayList<>();
+        StringBuilder doUpdateSet = new StringBuilder();
+        StringBuilder where = new StringBuilder();
+        //i=0是"update", 内容从i=1开始
+        for (int i = 1; i < writeModeArr.length; i++) {
+            String writeModSubString = writeModeArr[i];
+            int idx = writeModSubString.indexOf("(");
+            String op = writeModSubString.substring(0, idx).replace(" ", "");
+            String content = writeModSubString.substring(idx);
+            if ("on".equalsIgnoreCase(op)) {
+                onConflict.append(" ON CONFLICT ").append(content.replace(" ", ""));
+            } else if ("set".equalsIgnoreCase(op)) {
+                String[] updateFieldArr = content.replace(" ", "").replace("(", "").replace(")", "").split(",", -1);
+                for (String updateField : updateFieldArr) {
+                    if (!columnHolders.contains(updateField)) {
+                        continue;
+                    }
+                    updateSqlList.add(updateField + "=EXCLUDED." + updateField);
+                }
+            } else if ("where_sql".equalsIgnoreCase(op)) {
+                //where子句
+                where.append(" WHERE ").append(content);
+            } else if ("where".equalsIgnoreCase(op)) {
+                String[] whereFieldArr = content.replace(" ", "").replace("(", "").replace(")", "").split(",", -1);
+
+                for (String whereField : whereFieldArr) {
+                    if (!columnHolders.contains(whereField)) {
+                        continue;
+                    }
+                    whereSqlList.add("(COALESCE(t0." + whereField + ",'') != COALESCE(EXCLUDED." + whereField + ",''))");
+                }
+                if (whereFieldArr.length > 0) {
+                    where.append(" WHERE ").append(StringUtils.join(whereSqlList, " OR "));
+                }
+            } else {
+                throw DataXException.asDataXException(DBUtilErrorCode.ILLEGAL_VALUE,
+                        "您所配置的 writeMode(postgresql) 错误. " +
+                                "语法为update#on(col1, col2, ...)#set(col1, col2, ...)[#where(col1, col2, ...)|#where_sql(your_sql)]请检查您的配置并作出修改.");
+            }
+        }
+        if (updateSqlList.isEmpty()) {
+            doUpdateSet.append(" DO NOTHING");
+        } else {
+            doUpdateSet.append(" DO UPDATE SET ").append(StringUtils.join(updateSqlList, ","));
+        }
+        return onConflict.append(doUpdateSet).append(where);
+    }
+
+    private static StringBuilder upsertOldVersionForPostgresql(List<String> columnHolders, String[] writeModeArr) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(" ON CONFLICT ").append(writeModeArr[1].replace(" ", ""));
+        String[] updateFieldArr = writeModeArr[2].replace(" ", "").replace("(", "").replace(")", "").split(",", -1);
+
+        List<String> updateSqlList = new ArrayList<>();
+        for (String updateField : updateFieldArr) {
+            if (!columnHolders.contains(updateField)) {
+                continue;
+            }
+            updateSqlList.add(updateField + "=EXCLUDED." + updateField);
+        }
+
+        if (updateSqlList.isEmpty()) {
+            sb.append(" DO NOTHING");
+        } else {
+            sb.append(" DO UPDATE SET ").append(StringUtils.join(updateSqlList, ","));
+        }
+        return sb;
     }
 
     public static void preCheckPrePareSQL(Configuration originalConfig, DataBaseType type) {
@@ -227,11 +296,11 @@ public final class WriterUtil {
         if (null != renderedPreSqls && !renderedPreSqls.isEmpty()) {
             LOG.info("Begin to preCheck preSqls:[{}].",
                     StringUtils.join(renderedPreSqls, ";"));
-            for(String sql : renderedPreSqls) {
-                try{
+            for (String sql : renderedPreSqls) {
+                try {
                     DBUtil.sqlValid(sql, type);
-                }catch(ParserException e) {
-                    throw RdbmsException.asPreSQLParserException(type,e,sql);
+                } catch (ParserException e) {
+                    throw RdbmsException.asPreSQLParserException(type, e, sql);
                 }
             }
         }
@@ -250,11 +319,11 @@ public final class WriterUtil {
 
             LOG.info("Begin to preCheck postSqls:[{}].",
                     StringUtils.join(renderedPostSqls, ";"));
-            for(String sql : renderedPostSqls) {
-                try{
+            for (String sql : renderedPostSqls) {
+                try {
                     DBUtil.sqlValid(sql, type);
-                }catch(ParserException e){
-                    throw RdbmsException.asPostSQLParserException(type,e,sql);
+                } catch (ParserException e) {
+                    throw RdbmsException.asPostSQLParserException(type, e, sql);
                 }
 
             }
