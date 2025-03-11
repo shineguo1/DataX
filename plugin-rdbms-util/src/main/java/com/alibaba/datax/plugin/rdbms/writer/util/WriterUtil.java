@@ -243,7 +243,7 @@ public final class WriterUtil {
                     if (!columnHolders.contains(whereField)) {
                         continue;
                     }
-                    whereSqlList.add("(COALESCE(t0." + whereField + ",'') != COALESCE(EXCLUDED." + whereField + ",''))");
+                    whereSqlList.add("(t0." + whereField + " is not null and (t0." + whereField + " != EXCLUDED." + whereField + " or EXCLUDED." + whereField + " is null))");
                 }
                 if (whereFieldArr.length > 0) {
                     where.append(" WHERE ").append(StringUtils.join(whereSqlList, " OR "));
