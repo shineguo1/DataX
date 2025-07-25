@@ -16,7 +16,6 @@ import org.slf4j.LoggerFactory;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -111,16 +110,6 @@ public final class WriterUtil {
         }
     }
 
-    public static void main(String[] args) {
-        System.out.println(getWriteTemplate(
-                Arrays.asList("id", "member_id", "app_code", "app_biz_code", "app_record_no", "app_org_record_no", "monitor_rule_status", "app_creation_time", "app_update_time", "sub_biz_type", "main_export_region", "secondary_export_region", "goods_type", "historical_annual_sales", "created_at", "created_by", "updated_at", "updated_by"),
-                Arrays.asList("member_id", "app_code", "app_biz_code", "app_record_no", "app_org_record_no"),
-                "update#on(member_id, app_code, app_biz_code, app_record_no)#set(app_org_record_no, sub_biz_type, app_update_time, monitor_rule_status, updated_by)#where(app_org_record_no, sub_biz_type)",
-                DataBaseType.PostgreSQL,
-                false
-        ));
-    }
-
     public static String getWriteTemplate(List<String> columnHolders, List<String> valueHolders, String writeMode, DataBaseType dataBaseType, boolean forceUseUpdate) {
         boolean isWriteModeLegal = writeMode.trim().toLowerCase().startsWith("insert")
                 || writeMode.trim().toLowerCase().startsWith("replace")
@@ -135,7 +124,7 @@ public final class WriterUtil {
         if (forceUseUpdate ||
                 ((dataBaseType == DataBaseType.MySql || dataBaseType == DataBaseType.Tddl) && writeMode.trim().toLowerCase().startsWith("update"))
         ) {
-            //update只在mysql下使用
+            //官方update只在mysql下使用
 
             writeDataSqlTemplate = new StringBuilder()
                     .append("INSERT INTO %s (").append(StringUtils.join(columnHolders, ","))
@@ -144,12 +133,12 @@ public final class WriterUtil {
                     .append(onDuplicateKeyUpdateString(columnHolders))
                     .toString();
         } else if (dataBaseType == DataBaseType.PostgreSQL && writeMode.trim().toLowerCase().startsWith("update")) {
-            //新增postgreSQL的更新模式，进行增量更新
+            //新增Postgresql的update模式，进行增量更新upsert
             writeDataSqlTemplate = new StringBuilder()
-                    .append("INSERT INTO %s as t0 (").append(StringUtils.join(columnHolders, ","))
+                    .append("INSERT INTO %s as " + PostgresqlTemplate.TABLE_ALIAS + " (").append(StringUtils.join(columnHolders, ","))
                     .append(") VALUES(").append(StringUtils.join(valueHolders, ","))
                     .append(")")
-                    .append(onDuplicateKeyUpdateStringForPostgresql(writeMode.trim(), columnHolders))
+                    .append(PostgresqlTemplate.onDuplicateKeyUpdateString(writeMode.trim(), columnHolders))
                     .toString();
         } else {
 
@@ -186,101 +175,6 @@ public final class WriterUtil {
         }
 
         return sb.toString();
-    }
-
-    private static String onDuplicateKeyUpdateStringForPostgresql(String writeMode, List<String> columnHolders) {
-        String[] writeModeArr = writeMode.split("#", -1);
-        int writeModeArrLen = writeModeArr.length;
-        writeMode = writeModeArr[0].replace(" ", "");
-
-        StringBuilder sb;
-        if ("update".equals(writeMode) && writeModeArrLen == 2) {
-            sb = new StringBuilder().append(" ON CONFLICT ").append(writeModeArr[1].replace(" ", "")).append(" DO NOTHING");
-        } else if ("update".equals(writeMode) && writeModeArrLen >= 3) {
-            if (writeModeArr[1].startsWith("(")) {
-                sb = upsertOldVersionForPostgresql(columnHolders, writeModeArr);
-            } else {
-                sb = upsertNewVersionForPostgresql(columnHolders, writeModeArr);
-            }
-        } else {
-            throw DataXException.asDataXException(DBUtilErrorCode.ILLEGAL_VALUE,
-                    String.format("您所配置的 writeMode(postgresql):%s 错误. " +
-                            "语法为update#on(col1, col2, ...)#set(col1, col2, ...)[#where(col1, col2, ...) | #where_sql(your_sql)]请检查您的配置并作出修改.", writeMode));
-
-        }
-        return sb.toString();
-    }
-
-    private static StringBuilder upsertNewVersionForPostgresql(List<String> columnHolders, String[] writeModeArr) {
-        StringBuilder onConflict = new StringBuilder();
-        List<String> updateSqlList = new ArrayList<>();
-        List<String> whereSqlList = new ArrayList<>();
-        StringBuilder doUpdateSet = new StringBuilder();
-        StringBuilder where = new StringBuilder();
-        //i=0是"update", 内容从i=1开始
-        for (int i = 1; i < writeModeArr.length; i++) {
-            String writeModSubString = writeModeArr[i];
-            int idx = writeModSubString.indexOf("(");
-            String op = writeModSubString.substring(0, idx).replace(" ", "");
-            String content = writeModSubString.substring(idx);
-            if ("on".equalsIgnoreCase(op)) {
-                onConflict.append(" ON CONFLICT ").append(content.replace(" ", ""));
-            } else if ("set".equalsIgnoreCase(op)) {
-                String[] updateFieldArr = content.replace(" ", "").replace("(", "").replace(")", "").split(",", -1);
-                for (String updateField : updateFieldArr) {
-                    if (!columnHolders.contains(updateField)) {
-                        continue;
-                    }
-                    updateSqlList.add(updateField + "=EXCLUDED." + updateField);
-                }
-            } else if ("where_sql".equalsIgnoreCase(op)) {
-                //where子句
-                where.append(" WHERE ").append(content);
-            } else if ("where".equalsIgnoreCase(op)) {
-                String[] whereFieldArr = content.replace(" ", "").replace("(", "").replace(")", "").split(",", -1);
-
-                for (String whereField : whereFieldArr) {
-                    if (!columnHolders.contains(whereField)) {
-                        continue;
-                    }
-                    whereSqlList.add("(t0." + whereField + " is not null and (t0." + whereField + " != EXCLUDED." + whereField + " or EXCLUDED." + whereField + " is null))");
-                }
-                if (whereFieldArr.length > 0) {
-                    where.append(" WHERE ").append(StringUtils.join(whereSqlList, " OR "));
-                }
-            } else {
-                throw DataXException.asDataXException(DBUtilErrorCode.ILLEGAL_VALUE,
-                        "您所配置的 writeMode(postgresql) 错误. " +
-                                "语法为update#on(col1, col2, ...)#set(col1, col2, ...)[#where(col1, col2, ...)|#where_sql(your_sql)]请检查您的配置并作出修改.");
-            }
-        }
-        if (updateSqlList.isEmpty()) {
-            doUpdateSet.append(" DO NOTHING");
-        } else {
-            doUpdateSet.append(" DO UPDATE SET ").append(StringUtils.join(updateSqlList, ","));
-        }
-        return onConflict.append(doUpdateSet).append(where);
-    }
-
-    private static StringBuilder upsertOldVersionForPostgresql(List<String> columnHolders, String[] writeModeArr) {
-        StringBuilder sb = new StringBuilder();
-        sb.append(" ON CONFLICT ").append(writeModeArr[1].replace(" ", ""));
-        String[] updateFieldArr = writeModeArr[2].replace(" ", "").replace("(", "").replace(")", "").split(",", -1);
-
-        List<String> updateSqlList = new ArrayList<>();
-        for (String updateField : updateFieldArr) {
-            if (!columnHolders.contains(updateField)) {
-                continue;
-            }
-            updateSqlList.add(updateField + "=EXCLUDED." + updateField);
-        }
-
-        if (updateSqlList.isEmpty()) {
-            sb.append(" DO NOTHING");
-        } else {
-            sb.append(" DO UPDATE SET ").append(StringUtils.join(updateSqlList, ","));
-        }
-        return sb;
     }
 
     public static void preCheckPrePareSQL(Configuration originalConfig, DataBaseType type) {
